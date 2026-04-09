@@ -209,3 +209,4 @@ Present candidates grouped by reason in a table. Always include the row number, 
 - NEVER delete records without explicit user confirmation
 - The current active session cannot be deleted (warn the user if they try)
 - Always show the updated table after deletions
+

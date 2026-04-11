@@ -5,11 +5,13 @@ import argparse
 import glob
 import json
 import os
+import re
 import shlex
 import sys
 from datetime import datetime
 
 CONFIG_PATH = os.path.expanduser('~/.claude/chat-manager.config.json')
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -71,11 +73,11 @@ def claude_code_parse(path: str, source: dict) -> dict | None:
 
         for line in lines:
             data = json.loads(line)
-            if data.get('type') == 'user' and not data.get('isMeta'):
-                msg_count += 1
+            if data.get('type') == 'user' and not data.get('isMeta') and not data.get('isSidechain'):
                 content = data['message'].get('content', '')
                 if isinstance(content, list):
-                    texts = [c.get('text', '') for c in content if c.get('type') == 'text']
+                    texts = [c.get('text', '') for c in content
+                             if c.get('type') == 'text']
                     content = ' '.join(texts)
                 if isinstance(content, str):
                     if '<command-' in content or '<local-command-' in content:
@@ -84,6 +86,7 @@ def claude_code_parse(path: str, source: dict) -> dict | None:
                     if not first_msg and len(stripped) > 2:
                         first_msg = stripped.replace('\n', ' ')[:60]
                         date_str = data.get('timestamp', '')[:16].replace('T', ' ')
+                msg_count += 1
 
         if not first_msg:
             first_msg = '(system/command only)'
@@ -156,7 +159,6 @@ def codex_parse(path: str, source: dict) -> dict | None:
         ts = payload.get('timestamp', '')
         date_str = ts[:16].replace('T', ' ') if ts else ''
 
-        # Project: last component of cwd, or '~' for home
         if original_cwd:
             home = os.path.expanduser('~')
             if original_cwd == home:
@@ -245,16 +247,199 @@ def _gather_records(config: list[dict]) -> list[dict]:
     return records
 
 
-def _find_record_by_path(path: str, config: list[dict]) -> dict | None:
-    for source in config:
-        adapter_type = source.get('type')
-        if adapter_type not in ADAPTERS:
+# ── Inspect helpers ───────────────────────────────────────────────────────────
+
+def _summarize_input(inp: dict) -> str:
+    """Compact single-line summary of a tool input dict."""
+    if not inp:
+        return ''
+    # Common tool-specific extractions
+    if 'command' in inp:
+        return inp['command'][:60].replace('\n', ' ')
+    if 'file_path' in inp:
+        return os.path.basename(inp['file_path'])
+    if 'pattern' in inp:
+        return inp['pattern'][:60]
+    if 'path' in inp:
+        return os.path.basename(inp['path'])
+    # Generic: first 2 key=value pairs
+    pairs = [f'{k}={str(v)[:30]}' for k, v in list(inp.items())[:2]]
+    return ', '.join(pairs)[:60]
+
+
+def _render_claude_blocks(data: dict) -> list[str]:
+    """Extract printable lines from a Claude Code JSONL message row."""
+    message = data.get('message', {})
+    content = message.get('content', '')
+    out = []
+
+    if isinstance(content, str):
+        stripped = content.strip()
+        if stripped:
+            out.append(stripped)
+        return out
+
+    if not isinstance(content, list):
+        return out
+
+    for block in content:
+        bt = block.get('type', '')
+        if bt == 'text':
+            text = block.get('text', '').strip()
+            if text:
+                out.append(text)
+        elif bt == 'tool_use':
+            name = block.get('name', '?')
+            summary = _summarize_input(block.get('input', {}))
+            out.append(f'→ {name}({summary})')
+        elif bt == 'tool_result':
+            body = block.get('content', '')
+            if isinstance(body, list):
+                texts = [b.get('text', '') for b in body
+                         if isinstance(b, dict) and b.get('type') == 'text']
+                body = '\n'.join(texts)
+            snippet = str(body)[:200].replace('\n', ' ')
+            prefix = '✗' if block.get('is_error') else '←'
+            if snippet:
+                out.append(f'{prefix} {snippet}')
+        # thinking: hidden by default (no --show-thinking flag yet)
+    return out
+
+
+def _render_codex_items(lines: list[str]) -> list[tuple[str, str, str]]:
+    """
+    Parse Codex JSONL response_item stream.
+    Returns list of (role_label, body, timestamp).
+    role_label: 'USER' | 'ASST' | 'TOOL'
+    """
+    items = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except Exception:
             continue
-        _, parse_fn = ADAPTERS[adapter_type]
-        rec = parse_fn(path, source)
-        if rec:
-            return rec
-    return None
+        if event.get('type') != 'response_item':
+            continue
+        payload = event.get('payload', {})
+        pt = payload.get('type', '')
+        ts = event.get('timestamp', '')[:16].replace('T', ' ')
+
+        if pt == 'message':
+            role = payload.get('role', '')
+            if role == 'developer':
+                continue  # system prompt — skip
+            content = payload.get('content', [])
+            texts = []
+            for block in content:
+                bt = block.get('type', '')
+                if bt in ('input_text', 'output_text'):
+                    texts.append(block.get('text', ''))
+            body = '\n'.join(t for t in texts if t.strip())
+            if not body:
+                continue
+            if role == 'user' and _is_terminal_prompt(body):
+                continue
+            role_label = 'USER' if role == 'user' else 'ASST'
+            items.append((role_label, body, ts))
+
+        elif pt == 'function_call':
+            name = payload.get('name', '?')
+            args_str = payload.get('arguments', '{}')
+            try:
+                args = json.loads(args_str)
+            except Exception:
+                args = {}
+            summary = _summarize_input(args)
+            items.append(('TOOL', f'→ {name}({summary})', ts))
+
+        elif pt == 'function_call_output':
+            out = payload.get('output', '')
+            if isinstance(out, dict):
+                out = out.get('content', '') or json.dumps(out)[:200]
+            snippet = str(out)[:200].replace('\n', ' ')
+            items.append(('TOOL', f'← {snippet}', ts))
+
+    return items
+
+
+# ── Searchable text extraction ─────────────────────────────────────────────────
+
+def _extract_searchable_text(path: str, source_type: str) -> list[tuple[str, str, str]]:
+    """
+    Return (role, text, timestamp) chunks from a session file.
+    Text is human-readable (no raw JSON structures).
+    Used by both search and cleanup/_dupe_key.
+    """
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except Exception:
+        return []
+
+    chunks = []
+
+    if source_type == 'claude-code':
+        for line in lines:
+            try:
+                data = json.loads(line)
+            except Exception:
+                continue
+            if data.get('isSidechain'):
+                continue
+            role_type = data.get('type', '')
+            if role_type not in ('user', 'assistant'):
+                continue
+            ts = data.get('timestamp', '')[:16].replace('T', ' ')
+            role_label = 'USER' if role_type == 'user' else 'ASST'
+            rendered = _render_claude_blocks(data)
+            for text in rendered:
+                if text.strip():
+                    chunks.append((role_label, text, ts))
+
+    elif source_type == 'codex':
+        chunks = _render_codex_items(lines)
+
+    return chunks
+
+
+# ── Cleanup helpers ────────────────────────────────────────────────────────────
+
+def _dupe_key(record: dict, path: str) -> str | None:
+    """
+    Derive a deduplication key from the first 3 substantive user messages.
+    Returns None if the session should be excluded from dupe grouping
+    (e.g., agent subagent files, sessions with no real user content).
+    """
+    # Skip subagent files
+    basename = os.path.basename(path)
+    if basename.startswith('agent-'):
+        return None
+
+    chunks = _extract_searchable_text(path, record['source_type'])
+    user_texts = []
+    for role, text, _ in chunks:
+        if role != 'USER':
+            continue
+        stripped = text.strip()
+        # Skip XML-wrapped template blocks
+        if stripped.startswith('<') and '>' in stripped[:40]:
+            continue
+        # Skip tool result lines from search (they start with ← or ✗)
+        if stripped.startswith(('←', '✗')):
+            continue
+        # Skip terminal prompts (Codex side)
+        if _is_terminal_prompt(stripped):
+            continue
+        user_texts.append(stripped[:120])
+        if len(user_texts) >= 3:
+            break
+
+    if not user_texts:
+        return None
+
+    # Normalize: lowercase + collapse whitespace
+    norm = ' | '.join(re.sub(r'\s+', ' ', t.lower()) for t in user_texts)
+    return norm
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -286,26 +471,26 @@ def cmd_scan(config: list[dict], as_json: bool = False) -> None:
     print('- To cleanup: cleanup')
 
     if as_json:
+        # Write JSON row→path map to stderr to keep stdout clean
         row_map = {i: r['path'] for i, r in enumerate(records, 1)}
-        print('\nJSON row→path map:')
-        print(json.dumps(row_map, indent=2))
+        print(json.dumps(row_map, indent=2), file=sys.stderr)
 
 
 def cmd_search(config: list[dict], keyword: str) -> None:
     records = _gather_records(config)
     results = []
+    kw_lower = keyword.lower()
+    multi_source = len(config) > 1
 
     for r in records:
-        try:
-            with open(r['path']) as f:
-                content = f.read()
-            if keyword.lower() not in content.lower():
+        chunks = _extract_searchable_text(r['path'], r['source_type'])
+        for role, text, ts in chunks:
+            if kw_lower not in text.lower():
                 continue
-            idx = content.lower().find(keyword.lower())
-            snippet = content[max(0, idx - 60):idx + 120].replace('\n', ' ')
-            results.append({**r, 'snippet': snippet})
-        except Exception:
-            pass
+            idx = text.lower().find(kw_lower)
+            snippet = text[max(0, idx - 60):idx + 120].replace('\n', ' ')
+            results.append({**r, 'match_role': role, 'snippet': snippet, 'match_ts': ts})
+            break  # one match per session
 
     if not results:
         print(f'No results found for: {keyword}')
@@ -313,8 +498,8 @@ def cmd_search(config: list[dict], keyword: str) -> None:
 
     print(f'Found {len(results)} match(es) for "{keyword}":\n')
     for i, r in enumerate(results, 1):
-        machine_info = f' [{r["machine"]}]' if len(config) > 1 else ''
-        print(f'{i}. [{r["project"]}{machine_info}] {r["date"]}')
+        machine_info = f' / {r["machine"]}' if multi_source else ''
+        print(f'{i}. [{r["project"]}{machine_info}] {r["date"]}  ({r["match_role"]})')
         print(f'   ...{r["snippet"]}...')
         print(f'   Path: {r["path"]}')
         print()
@@ -326,75 +511,56 @@ def cmd_inspect(config: list[dict], path: str) -> None:
         print(f'File not found: {path}', file=sys.stderr)
         sys.exit(1)
 
-    # Detect source type from path
     source_type = 'codex' if 'rollout-' in os.path.basename(path) else 'claude-code'
-
     print(f'Session: {path}\n')
 
     try:
         with open(path) as f:
             lines = f.readlines()
 
+        msg_num = 0
+
         if source_type == 'claude-code':
-            msg_num = 0
             for line in lines:
                 try:
                     data = json.loads(line)
                 except Exception:
                     continue
-                role = data.get('type')
-                if role == 'user' and not data.get('isMeta'):
-                    content = data['message'].get('content', '')
-                    if isinstance(content, list):
-                        texts = [c.get('text', '') for c in content if c.get('type') == 'text']
-                        content = ' '.join(texts)
-                    if isinstance(content, str):
-                        if '<command-' in content or '<local-command-' in content:
-                            continue
-                        msg_num += 1
-                        ts = data.get('timestamp', '')[:16].replace('T', ' ')
-                        print(f'[{msg_num}] USER  {ts}')
-                        print(content.strip())
-                        print()
-                elif role == 'assistant':
-                    content = data['message'].get('content', '')
-                    if isinstance(content, list):
-                        texts = [c.get('text', '') for c in content if c.get('type') == 'text']
-                        content = ' '.join(texts)
-                    if isinstance(content, str) and content.strip():
-                        msg_num += 1
-                        ts = data.get('timestamp', '')[:16].replace('T', ' ')
-                        print(f'[{msg_num}] ASST  {ts}')
-                        print(content.strip()[:500] + ('...' if len(content.strip()) > 500 else ''))
-                        print()
-        else:  # codex
-            msg_num = 0
-            for line in lines:
-                try:
-                    event = json.loads(line)
-                except Exception:
+                if data.get('isSidechain'):
                     continue
-                if event.get('type') != 'event_msg':
+                if data.get('isMeta'):
                     continue
-                ep = event.get('payload', {})
-                msg_type = ep.get('type', '')
-                if msg_type == 'user_message':
-                    message = ep.get('message', '')
-                    if _is_terminal_prompt(message):
+                role_type = data.get('type', '')
+                if role_type not in ('user', 'assistant'):
+                    continue
+
+                rendered = _render_claude_blocks(data)
+                if not rendered:
+                    continue
+
+                # Skip user messages that are purely command wrappers
+                if role_type == 'user':
+                    content = data.get('message', {}).get('content', '')
+                    if isinstance(content, str) and (
+                            '<command-' in content or '<local-command-' in content):
                         continue
-                    msg_num += 1
-                    ts = event.get('timestamp', '')[:16].replace('T', ' ')
-                    print(f'[{msg_num}] USER  {ts}')
-                    print(message.strip())
-                    print()
-                elif msg_type == 'assistant_message':
-                    message = ep.get('message', '')
-                    if message.strip():
-                        msg_num += 1
-                        ts = event.get('timestamp', '')[:16].replace('T', ' ')
-                        print(f'[{msg_num}] ASST  {ts}')
-                        print(message.strip()[:500] + ('...' if len(message.strip()) > 500 else ''))
-                        print()
+
+                ts = data.get('timestamp', '')[:16].replace('T', ' ')
+                role_label = 'USER' if role_type == 'user' else 'ASST'
+                msg_num += 1
+                print(f'[{msg_num}] {role_label}  {ts}')
+                for text in rendered:
+                    print(text)
+                print()
+
+        else:  # codex
+            items = _render_codex_items(lines)
+            for role_label, body, ts in items:
+                msg_num += 1
+                print(f'[{msg_num}] {role_label}  {ts}')
+                print(body)
+                print()
+
     except Exception as e:
         print(f'Error reading file: {e}', file=sys.stderr)
         sys.exit(1)
@@ -403,26 +569,34 @@ def cmd_inspect(config: list[dict], path: str) -> None:
 def cmd_cleanup(config: list[dict]) -> None:
     records = _gather_records(config)
     candidates = []
+    seen_keys: dict[str, str] = {}
 
-    seen_first_msgs: dict[str, str] = {}
+    LOW_SIGNAL = {
+        'hello', 'hey', 'hi', 'test', 'config', 'login',
+        '收到', '你好', '(system/command only)', '(no user messages)',
+    }
+
     for r in records:
         reasons = []
 
+        # Rule 1: very short sessions
         if r['msgs'] <= 2:
             reasons.append('0–2 user messages')
 
-        low_signal = {'hello', 'hey', 'test', 'config', 'login', 'hi',
-                      '收到', '你好', '(system/command only)', '(no user messages)'}
+        # Rule 2: low-signal opening message
         fm_lower = r['first_msg'].lower().strip()
-        if fm_lower in low_signal or fm_lower.startswith('what') and len(fm_lower) < 20:
+        if fm_lower in LOW_SIGNAL:
             reasons.append('low-signal first message')
 
-        # Check for near-duplicates by first message
-        key = fm_lower[:40]
-        if key in seen_first_msgs:
-            reasons.append(f'duplicate topic (see: {seen_first_msgs[key]})')
-        else:
-            seen_first_msgs[key] = r['path']
+        # Rule 3: duplicate topic (conservative — needs 3-message key match)
+        key = _dupe_key(r, r['path'])
+        if key is not None:
+            if key in seen_keys:
+                reasons.append(
+                    f'duplicate topic (first seen: {os.path.basename(seen_keys[key])})'
+                )
+            else:
+                seen_keys[key] = r['path']
 
         if reasons:
             candidates.append({**r, 'reasons': reasons})
@@ -449,7 +623,6 @@ def cmd_resume(config: list[dict], path: str) -> None:
         print(f'File not found: {path}', file=sys.stderr)
         sys.exit(1)
 
-    # Find the record by scanning the matching source
     rec = None
     for source in config:
         adapter_type = source.get('type')
@@ -496,7 +669,7 @@ def main() -> None:
 
     p_scan = sub.add_parser('scan', help='List all sessions in a table')
     p_scan.add_argument('--json', action='store_true', dest='as_json',
-                        help='Also output JSON row→path map')
+                        help='Also output JSON row→path map (written to stderr)')
 
     p_search = sub.add_parser('search', help='Full-text search across all sessions')
     p_search.add_argument('keyword', help='Search term')

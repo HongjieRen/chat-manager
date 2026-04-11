@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """chat-manager: multi-source AI chat history reader (Claude Code + Codex)"""
 
+__version__ = "2.1.0"
+
 import argparse
 import glob
 import json
@@ -682,7 +684,14 @@ def main() -> None:
     p_resume = sub.add_parser('resume', help='Print resume command for a session')
     p_resume.add_argument('path', help='Absolute path to .jsonl file')
 
+    sub.add_parser('version', help='Print version and exit')
+
     args = parser.parse_args()
+
+    if args.cmd == 'version':
+        print(__version__)
+        return
+
     config = load_config()
 
     if args.cmd == 'scan':

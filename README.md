@@ -1,5 +1,9 @@
 # chat-manager
 
+A Claude Code skill for managing AI chat history across **Claude Code, Codex CLI, and multiple machines** — list, search, inspect, delete, and resume past sessions.
+
+![demo](https://raw.githubusercontent.com/Scigentic-Labs/chat-manager/main/demo.gif)
+
 A Claude Code skill for managing your conversation history — list, search, inspect, delete, and resume past sessions.
 
 ## Install

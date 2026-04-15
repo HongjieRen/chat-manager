@@ -16,9 +16,8 @@ All logic lives in `chat_manager.py`. Each command below is a thin wrapper.
 ## Update Check (run first, every invocation)
 
 ```bash
-_CM="python3 ~/.claude/skills/chat-manager/chat_manager.py"
-_LOCAL_VER=$($_CM version 2>/dev/null || echo "unknown")
-_AUTO_FILE=~/.claude/chat-manager.auto-update
+_LOCAL_VER=$(python3 ~/.claude/skills/chat-manager/chat_manager.py version 2>/dev/null || echo "unknown")
+_AUTO_FILE=$HOME/.claude/chat-manager.auto-update
 _REMOTE_VER=""
 
 # If auto-update enabled, skip the prompt and upgrade silently

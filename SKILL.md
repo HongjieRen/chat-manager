@@ -17,43 +17,38 @@ All logic lives in `chat_manager.py`. Each command below is a thin wrapper.
 
 ```bash
 _CM="python3 ~/.claude/skills/chat-manager/chat_manager.py"
-_LOCAL_VER=$($CM version 2>/dev/null || echo "unknown")
-_SNOOZE_FILE=~/.claude/chat-manager.update-snoozed
+_LOCAL_VER=$($_CM version 2>/dev/null || echo "unknown")
+_AUTO_FILE=~/.claude/chat-manager.auto-update
 _REMOTE_VER=""
 
-# Skip if snoozed for this version
-_SNOOZED=false
-if [ -f "$_SNOOZE_FILE" ]; then
-  _SNOOZED_VER=$(awk '{print $1}' "$_SNOOZE_FILE")
-  _SNOOZE_TS=$(awk '{print $2}' "$_SNOOZE_FILE")
-  _NOW=$(date +%s)
-  _SNOOZE_EXPIRES=$(( _SNOOZE_TS + 86400 ))
-  if [ "$_SNOOZED_VER" != "" ] && [ "$_NOW" -lt "$_SNOOZE_EXPIRES" ]; then
-    _SNOOZED=true
-  fi
-fi
-
-if [ "$_SNOOZED" = "false" ]; then
+# If auto-update enabled, skip the prompt and upgrade silently
+if [ -f "$_AUTO_FILE" ] && [ "$(cat "$_AUTO_FILE")" = "true" ]; then
   _REMOTE_VER=$(curl -sf --max-time 3 \
     https://raw.githubusercontent.com/Scigentic-Labs/chat-manager/main/chat_manager.py \
     | grep '^__version__' | head -1 | cut -d'"' -f2 2>/dev/null || echo "")
-fi
-
-if [ -n "$_REMOTE_VER" ] && [ "$_REMOTE_VER" != "$_LOCAL_VER" ]; then
-  echo "UPGRADE_AVAILABLE $_LOCAL_VER $_REMOTE_VER"
+  if [ -n "$_REMOTE_VER" ] && [ "$_REMOTE_VER" != "$_LOCAL_VER" ]; then
+    echo "AUTO_UPGRADE $_LOCAL_VER $_REMOTE_VER"
+  fi
+else
+  _REMOTE_VER=$(curl -sf --max-time 3 \
+    https://raw.githubusercontent.com/Scigentic-Labs/chat-manager/main/chat_manager.py \
+    | grep '^__version__' | head -1 | cut -d'"' -f2 2>/dev/null || echo "")
+  if [ -n "$_REMOTE_VER" ] && [ "$_REMOTE_VER" != "$_LOCAL_VER" ]; then
+    echo "UPGRADE_AVAILABLE $_LOCAL_VER $_REMOTE_VER"
+  fi
 fi
 ```
+
+**If `AUTO_UPGRADE` is printed:** run the inline upgrade silently, then tell user "chat-manager updated v{old} → v{new} (auto-update is on)." and continue.
 
 **If `UPGRADE_AVAILABLE` is printed:**
 
 Use AskUserQuestion:
 - header: "Update available"
-- question: "chat-manager **v{new}** is available (you're on v{old}). Update now?"
+- question: "chat-manager **v{new}** is available (you're on v{old})."
 - options:
-  - "Yes, update now" → run the inline upgrade below
-  - "Remind me tomorrow" → write snooze: `echo "{new} $(date +%s)" > ~/.claude/chat-manager.update-snoozed`; tell user "Reminder set for tomorrow"; continue with original command
-  - "Skip this version" → write `echo "{new} 9999999999" > ~/.claude/chat-manager.update-snoozed`; tell user "Will not remind again for this version"; continue
-  - "Never check for updates" → `echo "disabled" > ~/.claude/chat-manager.update-snoozed`; tell user "Update checks disabled. Delete `~/.claude/chat-manager.update-snoozed` to re-enable."; continue
+  - "Yes, update now" → run the inline upgrade below, then continue with original command
+  - "Enable auto-update" → run the inline upgrade below, then write `echo "true" > ~/.claude/chat-manager.auto-update`; tell user "Updated to v{new}. Future updates will install automatically."; continue with original command
 
 **Inline upgrade flow:**
 

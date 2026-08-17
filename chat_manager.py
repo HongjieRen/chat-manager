@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """chat-manager: multi-source AI chat history reader (Claude Code + Codex)"""
 
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 
 import argparse
 import glob
@@ -925,8 +925,23 @@ def cmd_purge_quarantine(days: int, apply: bool = False) -> None:
         return
 
     cutoff = datetime.now().timestamp() - (days * 86400)
-    found = [p for p in glob.glob(f'{quarantine_base}/**/*.jsonl', recursive=True)
-             if os.path.getmtime(p) < cutoff]
+    found = []
+    for dirpath, _, filenames in os.walk(quarantine_base):
+        for filename in filenames:
+            if not filename.endswith('.jsonl'):
+                continue
+            path = os.path.join(dirpath, filename)
+            rel_path = os.path.relpath(path, quarantine_base)
+            batch_name = rel_path.split(os.sep, 1)[0]
+            try:
+                quarantined_at = datetime.strptime(
+                    batch_name, '%Y%m%d-%H%M%S'
+                ).timestamp()
+            except ValueError:
+                quarantined_at = os.path.getmtime(path)
+            if quarantined_at < cutoff:
+                found.append(path)
+    found.sort()
 
     if not found:
         print(f'No quarantined files older than {days} days.')

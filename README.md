@@ -10,7 +10,7 @@ Scan, search, inspect, resume, redact secrets, and clean up session transcripts 
 - **Secret detection & redaction**: finds API keys, GitHub tokens, and other credentials; redacts in-place with backup
 - **Cleanup analysis**: flags short sessions, low-signal openers, auto-generated task runs, and duplicate topics
 - **Quarantine & restore**: safely moves sessions out of active storage; restore with one command
-- **Purge quarantine**: built-in TTL deletion for old quarantined files (no cron needed)
+- **Purge quarantine**: manually delete quarantined files older than a TTL, based on when they entered quarantine
 - **Auto-update**: checks remote version on every invocation; semver-aware (won't downgrade)
 
 ---
@@ -182,6 +182,10 @@ python3 chat_manager.py purge-quarantine --days 7           # dry run (default: 
 python3 chat_manager.py purge-quarantine --days 7 --apply   # delete
 ```
 
+This command is manual; it does not install a timer or background job. Age is
+measured from the quarantine batch timestamp, not the transcript's original
+modification time.
+
 ---
 
 ## Multi-machine setup
@@ -221,6 +225,7 @@ When multiple sources are configured, the scan table gains a `Machine` and `Sour
 
 | Version | Changes |
 |---------|---------|
+| 2.4.1 | Fix purge traversal for hidden `.codex` paths; measure TTL from quarantine time; clarify manual purge behavior |
 | 2.4.0 | `restore` command; `purge-quarantine` command; auto-generated task detection in `cleanup`; semver-aware update check |
 | 2.3.0 | Codex CLI support; multi-source config; secret redaction with backups |
 | 2.1.0 | Initial release: scan, search, inspect, resume, quarantine, cleanup |

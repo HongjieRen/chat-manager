@@ -1,7 +1,6 @@
 ---
 name: chat-manager
 description: List, inspect, search, and delete AI chat history across tools and machines
-user_invocable: true
 ---
 
 # Chat Manager
@@ -154,7 +153,9 @@ Moves the file back to its original location. Fails if destination already exist
 
 ## Purge quarantine
 
-Remove quarantined files older than N days (default 7). Dry-run first:
+Manually remove quarantined files older than N days (default 7), measured from
+the time they entered quarantine. This command does not run automatically.
+Dry-run first:
 
 ```bash
 python3 ~/.claude/skills/chat-manager/chat_manager.py purge-quarantine --days 7
